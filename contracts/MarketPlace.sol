@@ -6,6 +6,7 @@ import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol"
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC1155/utils/ERC1155HolderUpgradeable.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "./TimeLock.sol";
 
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -16,7 +17,7 @@ interface IERC20BurnableUpgradeable is IERC20 {
     function burn(uint256 amount) external;
 }
 
-contract MarketPlace is Initializable, AccessControlUpgradeable, ReentrancyGuardUpgradeable, ERC1155HolderUpgradeable  {
+contract MarketPlace is Initializable, AccessControlUpgradeable, ReentrancyGuardUpgradeable, ERC1155HolderUpgradeable, IERC721Receiver {
     using SafeERC20 for IERC20;
 
     bytes32 public constant BID_SELLOFFER_CREATOR_ROLE = keccak256("BID_SELLOFFER_CREATOR_ROLE");
@@ -29,20 +30,27 @@ contract MarketPlace is Initializable, AccessControlUpgradeable, ReentrancyGuard
         address winnerAddress,
         uint256 claimTime
     );
+
+    // Define a struct to group related parameters
+    struct OfferDetails {
+        uint256 startTime;
+        uint256 endTime;
+        IERC20 paymentToken;
+        uint256 price;
+        SellOfferType sellOfferType;
+        address payoutAddress;
+        bool isERC1155;
+        uint256[] tokenAmounts;
+        uint256 stakeDuration;
+    }
+
     event NewSellOfferCreated(
         uint256 sellOfferId,
         uint256 createdAt,
         uint256[] tokenIds,
         address nftAddress,
-        uint256 startTime,
-        uint256 endTime,
-        IERC20 paymentToken,
-        uint256 price,
-        SellOfferType sellOfferType,
-        address payoutAddress,
-        bool isERC1155,
-        address creatorAddress,
-        uint256[] tokenAmounts
+        OfferDetails details,
+        address creatorAddress
     );
 
     event onBuyOrBid(
@@ -113,11 +121,13 @@ contract MarketPlace is Initializable, AccessControlUpgradeable, ReentrancyGuard
         address payoutAddress;
         bool isERC1155;
         uint256[] amounts;
+        uint256 stakeDuration;
     }   
 
     mapping(uint256 => mapping(uint256 => uint256)) public tokenToTotalBid;
     mapping(address => uint256[]) public sellOffersByCreator;
     mapping(address => bool) public whitelistedNFTs;
+    mapping(uint256 => uint256) public auctionIdToStakeDuration;
 
     address public timeLock;        
 
@@ -187,6 +197,15 @@ contract MarketPlace is Initializable, AccessControlUpgradeable, ReentrancyGuard
         }
     }
 
+    function onERC721Received(
+        address operator,
+        address from,
+        uint256 tokenId,
+        bytes calldata data
+    ) external override returns (bytes4) {
+        return IERC721Receiver.onERC721Received.selector;
+    }
+
     // Handles the transfer of ERC721 tokens
     function _transferERC721Tokens(
         address nftAddress,
@@ -210,7 +229,7 @@ contract MarketPlace is Initializable, AccessControlUpgradeable, ReentrancyGuard
     ) internal {
         IERC1155 nft1155 = IERC1155(nftAddress);
         for (uint256 i = 0; i < tokenIds.length; i++) {
-            nft1155.safeTransferFrom(from, to, tokenIds[i], amounts[i], "");
+            nft1155.safeTransferFrom(from, to, tokenIds[i], amounts[i], "Transfer failed");
         }
     }
 
@@ -248,6 +267,9 @@ contract MarketPlace is Initializable, AccessControlUpgradeable, ReentrancyGuard
 
         uint256 sellOfferId = sellOfferDetails.length - 1;
         sellOffersByCreator[msg.sender].push(sellOfferId);
+        if (params.sellOfferType == SellOfferType.STAKE) {
+            auctionIdToStakeDuration[sellOfferId] = params.stakeDuration;
+        }
 
         // Initialize the tokenAmounts mapping for each tokenId
         if (params.isERC1155) {
@@ -263,21 +285,25 @@ contract MarketPlace is Initializable, AccessControlUpgradeable, ReentrancyGuard
             _transferERC721Tokens(params.nftAddress, params.tokenIds, msg.sender, address(this));
         }
 
+        OfferDetails memory details = OfferDetails({
+            startTime: params.startTime,
+            endTime: params.endTime,
+            paymentToken: params.paymentToken,
+            price: params.price,
+            sellOfferType: params.sellOfferType,
+            payoutAddress: params.payoutAddress,
+            isERC1155: params.isERC1155,
+            tokenAmounts: params.amounts,
+            stakeDuration: 0
+        });
 
         emit NewSellOfferCreated(
-            sellOfferId, // Added sellOffer ID here, assuming it's the index of the last sellOffer created
+            sellOfferId,
             _sellOffer.createdAt,
             _sellOffer.tokenIds,
             _sellOffer.nftAddress,
-            _sellOffer.startTime,
-            _sellOffer.endTime,
-            _sellOffer.paymentToken,
-            _sellOffer.price,
-            _sellOffer.sellOfferType,
-            _sellOffer.payoutAddress,
-            _sellOffer.isERC1155,
-            _sellOffer.creatorAddress,
-            params.amounts
+            details,
+            _sellOffer.creatorAddress
         );
     }
 
@@ -568,12 +594,15 @@ contract MarketPlace is Initializable, AccessControlUpgradeable, ReentrancyGuard
 
         // Start from the last sell offer and move backwards, processing up to the specified number of sell offers
         uint256 limit = numberOfSellOffers < count ? numberOfSellOffers : count;
-        for (uint256 i = count; i > count - limit-1; i--) {
+        uint256 payoutCount = 0;
+        for (uint256 i = count; i > count - limit; i--) {
             uint256 sellOfferId = sellOfferIds[i - 1];
             SellOffers storage sellOffer = sellOfferDetails[sellOfferId];
             require(sellOffer.creatorAddress == msg.sender, "Caller is not the creator of this sell offer.");
             payout(sellOfferId);
+            payoutCount++;
         }
+        require(payoutCount == numberOfSellOffers, "Payout count is not equal to the number of sell offers.");        
     }
 
     function claimNFT(uint256 sellOfferId, uint256 tokenId) external nonReentrant {
@@ -595,7 +624,7 @@ contract MarketPlace is Initializable, AccessControlUpgradeable, ReentrancyGuard
         if (_sellOffer.sellOfferType == SellOfferType.STAKE) {            
             
             paymentToken.approve(address(timeLock), amount);
-            TimeLock(timeLock).deposit(address(paymentToken), amount, winningBid.userAddress);
+            TimeLock(timeLock).deposit(address(paymentToken), amount, winningBid.userAddress, _sellOffer.endTime + auctionIdToStakeDuration[sellOfferId]);
         } else {
             if (_sellOffer.payoutAddress == address(0)) {
                 IERC20BurnableUpgradeable(address(paymentToken)).burn(amount);
@@ -669,7 +698,3 @@ contract MarketPlace is Initializable, AccessControlUpgradeable, ReentrancyGuard
         timeLock = _timeLock;
     }
 }
-
-
-
-

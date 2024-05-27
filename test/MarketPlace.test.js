@@ -3,7 +3,7 @@ const { ethers, upgrades } = require("hardhat");
 
 
 describe("SellOffer", function () {
-    let sellOffer, simpleERC1155, dummyToken, marketPlace;
+    let sellOffer, simpleERC1155, simpleERC721, dummyToken, marketPlace;
     let deployer, bidder, payoutAddress, bidAuctionCreator, buyNowAuctionCreator, stakeAuctionCreator, unauthorizedUser;
     let otherBidder;
     let SellOfferParams;
@@ -24,9 +24,12 @@ describe("SellOffer", function () {
         const SimpleERC1155 = await ethers.getContractFactory("SimpleERC1155");
         simpleERC1155 = await SimpleERC1155.deploy(deployer.address);
 
+        SimpleERC721 = await ethers.getContractFactory("SimpleERC721");
+        simpleERC721 = await SimpleERC721.deploy("Test NFT", "TNFT", deployer.address);
+
         // Deploy SellOffer contract
         const MarketPlace = await ethers.getContractFactory("MarketPlace");
-        marketPlace = await upgrades.deployProxy(MarketPlace, [deployer.address, dummyTokenAddress, [await simpleERC1155.getAddress()]], {initializer: 'initialize'});
+        marketPlace = await upgrades.deployProxy(MarketPlace, [deployer.address, dummyTokenAddress, [await simpleERC1155.getAddress(), await simpleERC721.getAddress()]], {initializer: 'initialize'});
         auctionAddress = await marketPlace.getAddress();
 
         const DummyNonReceiver = await ethers.getContractFactory("DummyNonReceiver");
@@ -43,10 +46,14 @@ describe("SellOffer", function () {
         await simpleERC1155.mint(buyNowAuctionCreator.address, 3, 1, ethers.toUtf8Bytes(""));
         await simpleERC1155.mint(stakeAuctionCreator.address, 4, 1, ethers.toUtf8Bytes(""));
 
+        await simpleERC721.mint(deployer.address);
+        await simpleERC721.mint(bidAuctionCreator.address);
+        await simpleERC721.mint(buyNowAuctionCreator.address);
+        await simpleERC721.mint(stakeAuctionCreator.address);
         
 
         const TimeLock = await ethers.getContractFactory("TimeLock");
-        timeLock = await TimeLock.deploy(deployer.address, 0, auctionAddress);
+        timeLock = await TimeLock.deploy(deployer.address, auctionAddress);
         timeLockAddress = await timeLock.getAddress();
 
         await marketPlace.setTimeLockAddress(timeLockAddress);
@@ -56,6 +63,11 @@ describe("SellOffer", function () {
         await simpleERC1155.connect(bidAuctionCreator).setApprovalForAll(auctionAddress, true);
         await simpleERC1155.connect(buyNowAuctionCreator).setApprovalForAll(auctionAddress, true);
         await simpleERC1155.connect(stakeAuctionCreator).setApprovalForAll(auctionAddress, true);
+
+        await simpleERC721.connect(deployer).setApprovalForAll(auctionAddress, true);
+        await simpleERC721.connect(bidAuctionCreator).setApprovalForAll(auctionAddress, true);
+        await simpleERC721.connect(buyNowAuctionCreator).setApprovalForAll(auctionAddress, true);
+        await simpleERC721.connect(stakeAuctionCreator).setApprovalForAll(auctionAddress, true);
 
         const BID_SELLOFFER_CREATOR_ROLE = await marketPlace.BID_SELLOFFER_CREATOR_ROLE();
         const BUYNOW_SELLOFFER_CREATOR_ROLE = await marketPlace.BUYNOW_SELLOFFER_CREATOR_ROLE();
@@ -81,12 +93,14 @@ describe("SellOffer", function () {
 
     async function generateSellOfferParams(tokenIds, sellOfferType = "BID", isERC1155 = true, amounts = [], startTimeOffset = 60, endTimeOffset = 86400) {
         let sellOfferTypeValue;
+        let stakeDuration = 0;
         if (sellOfferType === "BID") {
             sellOfferTypeValue = 0;
         } else if (sellOfferType === "BUYNOW") {
             sellOfferTypeValue = 1;
         } else if (sellOfferType === "STAKE") {
             sellOfferTypeValue = 2;
+            stakeDuration = 60;
         } else {
             sellOfferTypeValue = 99;
         }
@@ -99,10 +113,16 @@ describe("SellOffer", function () {
         const currentTimestamp = currentBlock.timestamp+1;
         const startTime = currentTimestamp + startTimeOffset; // Default 1 minute from now
         const endTime = currentTimestamp + endTimeOffset; // Default 1 day from now
+        let nftAddress;
+        if (isERC1155){
+            nftAddress = await simpleERC1155.getAddress()
+        } else {
+            nftAddress = await simpleERC721.getAddress()
+        }
 
         return {
             tokenIds: tokenIds,
-            nftAddress: await simpleERC1155.getAddress(),
+            nftAddress: nftAddress,
             startTime: startTime,
             endTime: endTime,
             paymentToken: await dummyToken.getAddress(),
@@ -111,7 +131,8 @@ describe("SellOffer", function () {
             payoutAddress: payoutAddress.address,
             isERC1155: isERC1155,
             amounts: amounts,
-            merkleRoot: "0x" + "0".repeat(64)
+            merkleRoot: "0x" + "0".repeat(64),
+            stakeDuration: stakeDuration
         };
     }
     
@@ -145,6 +166,13 @@ describe("SellOffer", function () {
             expect(await marketPlace.whitelistedNFTs(nftAddressToAdd)).to.be.true;
         });
 
+        it("Should allow whitelisting SimpleERC721 NFTs for selling", async function () {
+            const nftAddressToAdd = await simpleERC721.getAddress();
+            await marketPlace.connect(deployer).addNFTToWhitelist(nftAddressToAdd);
+            // Check if the SimpleERC721 NFT address is now whitelisted
+            expect(await marketPlace.whitelistedNFTs(nftAddressToAdd)).to.be.true;
+        });
+
         it("Should allow removing NFTs from whitelist", async function () {
             const nftAddressToRemove = await simpleERC1155.getAddress();
             // First add to whitelist
@@ -154,6 +182,7 @@ describe("SellOffer", function () {
             // Check if the NFT address is now not whitelisted
             expect(await marketPlace.whitelistedNFTs(nftAddressToRemove)).to.be.false;
         });
+        
         it("Should not allow creating a sell offer with an NFT address that is not whitelisted", async function () {
             const SimpleERC1155 = await ethers.getContractFactory("SimpleERC1155");
             const nonWhitelistedNFT = await SimpleERC1155.deploy(deployer.address);
@@ -164,6 +193,17 @@ describe("SellOffer", function () {
             await expect(marketPlace.connect(deployer).createSellOffer(invalidSellOfferParams))
                 .to.be.revertedWith("NFT address not whitelisted");
         });
+        it("Should not allow creating a sell offer with a SimpleERC721 NFT address that is not whitelisted", async function () {
+            const SimpleERC721 = await ethers.getContractFactory("SimpleERC721");
+            const nonWhitelistedNFT = await SimpleERC721.deploy("TestToken", "TTK", deployer.address);
+            const nonWhitelistedNFTAddress = await nonWhitelistedNFT.getAddress();
+            const invalidSellOfferParams = await generateSellOfferParams([15], "BID", false, [1]);
+            invalidSellOfferParams.nftAddress = nonWhitelistedNFTAddress;
+
+            await expect(marketPlace.connect(deployer).createSellOffer(invalidSellOfferParams))
+                .to.be.revertedWith("NFT address not whitelisted");
+        });
+
         it("Should create a new sellOffer correctly", async function () {                
             const tx = await marketPlace.connect(deployer).createSellOffer(SellOfferParams);
             await tx.wait();
@@ -180,9 +220,7 @@ describe("SellOffer", function () {
             expect(createdAuction.paymentToken).to.equal(SellOfferParams.paymentToken);
             expect(createdAuction.price.toString()).to.equal(SellOfferParams.price.toString());
             expect(createdAuction.payoutAddress).to.equal(SellOfferParams.payoutAddress);
-            expect(createdAuction.isERC1155).to.equal(SellOfferParams.isERC1155);
-                
-
+            expect(createdAuction.isERC1155).to.equal(SellOfferParams.isERC1155);                
         });
 
         it("Should allow all roles to add new sellOffer after assigning roles", async function () {    
@@ -298,6 +336,22 @@ describe("SellOffer", function () {
             expect(balanceToken2).to.equal(BigInt(amounts[1]));
         });
 
+        it("Should correctly transfer ERC721 tokens from the sellOffer creator to the marketPlace contract", async function () {
+            await simpleERC721.mint(bidAuctionCreator.address);
+            const tokenId = await simpleERC721.tokenIds();
+            const erc721SellOfferParams = await generateSellOfferParams([tokenId], "BID", false);
+
+            // Approve the marketPlace contract to transfer ERC721 tokens on behalf of the sellOffer creator
+            await simpleERC721.connect(bidAuctionCreator).setApprovalForAll(auctionAddress, true);
+
+            // Start the sellOffer with the specified parameters
+            await marketPlace.connect(bidAuctionCreator).createSellOffer(erc721SellOfferParams);
+
+            // Check that the marketPlace contract now holds the token
+            const ownerOfToken = await simpleERC721.ownerOf(tokenId);
+            expect(ownerOfToken).to.equal(auctionAddress);
+        });
+
         it("Should only allow auctions to be created with whitelisted payment tokens", async function () {
             const nonWhitelistedToken = await ethers.getContractFactory("DummyToken");
             const nonWhitelistedTokenInstance = await nonWhitelistedToken.deploy(ethers.parseEther("1000"));
@@ -320,6 +374,228 @@ describe("SellOffer", function () {
         });        
     });
 
+    describe("ERC7211 Bidding", function () {
+        let startTime, endTime, tokenId;
+        beforeEach(async function () {
+            await simpleERC721.mint(bidAuctionCreator.address);
+            tokenId = await simpleERC721.tokenIds();
+            const bidSellOfferParams = await generateSellOfferParams([tokenId], "BID", false, [1]);
+
+            startTime = bidSellOfferParams.startTime;
+            endTime = bidSellOfferParams.endTime;
+
+            await expect(marketPlace.connect(bidAuctionCreator).createSellOffer(bidSellOfferParams))
+                .to.emit(marketPlace, 'NewSellOfferCreated');
+        });
+
+        it("Should allow users to place bids on an ERC7211 sellOffer of BID type", async function () {
+            const sellOfferId = await marketPlace.currentsellOfferId();            
+            const bidAmount = ethers.parseEther("15"); // Bid amount in ether
+
+            // Fetch the marketPlace details to ensure it's a BID type sellOffer
+            const auctionDetails = await marketPlace.sellOfferDetails(sellOfferId);
+            expect(auctionDetails.sellOfferType).to.equal(0n);
+
+            await advanceTimeTo(startTime + 1);
+
+            // Approve the marketPlace contract to spend the bid amount on behalf of the bidder
+            await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
+
+            // Place a bid
+            await expect(marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, bidAmount, []))
+                .to.emit(marketPlace, 'onBuyOrBid');
+
+            // Verify the bid was recorded
+            const bids = await marketPlace.getTokenBid(sellOfferId, tokenId);
+            expect(bids.length).to.equal(1);
+            expect(bids[0].amt).to.equal(bidAmount);
+            expect(bids[0].userAddress).to.equal(bidder.address);
+        });
+
+        it("Should reject bids placed before the ERC7211 sellOffer starts", async function () {
+            const sellOfferId = await marketPlace.currentsellOfferId();            
+            const bidAmount = ethers.parseEther("15"); // Bid amount in ether
+            await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
+
+            // Attempt to place a bid before the sellOffer starts
+            await advanceTimeTo(startTime - 1);
+            await expect(marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, bidAmount, []))
+                .to.be.revertedWith("SellOffer has not started yet");
+        });
+
+        it("Should reject bids placed after the ERC7211 sellOffer has ended", async function () {
+            const sellOfferId = await marketPlace.currentsellOfferId();            
+            const bidAmount = ethers.parseEther("15"); // Bid amount in ether
+            await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
+
+            // Attempt to place a bid after the sellOffer has ended
+            await advanceTimeTo(endTime + 1);
+            await expect(marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, bidAmount, []))
+                .to.be.revertedWith("SellOffer has already ended for this token");
+        });
+
+        it("Should reject bids on BUYNOW type auctions", async function () {
+            // Create a BUYNOW type sellOffer
+            await simpleERC721.mint(buyNowAuctionCreator.address);
+            tokenId = await simpleERC721.tokenIds();
+            const buynowSellOfferParams = await generateSellOfferParams([tokenId], "BUYNOW", false, [1]);
+            await marketPlace.connect(buyNowAuctionCreator).createSellOffer(buynowSellOfferParams);
+            const buynowsellOfferId = await marketPlace.currentsellOfferId();            
+            const bidAmount = ethers.parseEther("10"); // Bid amount in ether
+            await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
+
+            // Attempt to place a bid on a BUYNOW type sellOffer
+            await advanceTimeTo(buynowSellOfferParams.startTime);
+            await expect(marketPlace.connect(bidder).placeBid(buynowsellOfferId, tokenId, bidAmount, []))
+                .to.be.revertedWith("Can't place bid.");
+        });
+        it("Should allow bids on ERC721 STAKE type auctions", async function () {
+            // Create a BID type sellOffer for ERC721
+            await simpleERC721.mint(stakeAuctionCreator.address);
+            tokenId = await simpleERC721.tokenIds();
+            const bidSellOfferParams = await generateSellOfferParams([tokenId], "STAKE", false, [1]);
+            await marketPlace.connect(stakeAuctionCreator).createSellOffer(bidSellOfferParams);
+            const bidsellOfferId = await marketPlace.currentsellOfferId();
+            
+            const bidAmount = ethers.parseEther("10"); // Bid amount in ether
+            await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
+
+            // Attempt to place a bid on a BID type sellOffer for ERC721
+            await advanceTimeTo(bidSellOfferParams.startTime);
+            await expect(marketPlace.connect(bidder).placeBid(bidsellOfferId, tokenId, bidAmount, []))
+                .to.emit(marketPlace, 'onBuyOrBid');
+        });
+        it("Should reject bids below the minimum price or not higher than the last highest bid for ERC721", async function () {
+            const sellOfferId = await marketPlace.currentsellOfferId();            
+            const minimumBidAmount = ethers.parseEther("5"); // Minimum bid amount in ether
+
+            // Approve the sellOffer contract to spend the bidder's tokens
+            await dummyToken.connect(bidder).approve(auctionAddress, ethers.parseEther("100"));
+            await advanceTimeTo(startTime);
+            // Attempt to place a bid below the minimum price
+            const lowBidAmount = ethers.parseEther("4"); // Lower than the minimum bid amount
+            await expect(marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, lowBidAmount, []))
+                .to.be.revertedWith("Amount should be greater than price");
+
+            // Place a valid first bid
+            await marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, minimumBidAmount, []);
+
+            // Attempt to place a bid not higher than the last highest bid
+            const equalBidAmount = ethers.parseEther("5"); // Equal to the last highest bid
+            await expect(marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, equalBidAmount, []))
+                .to.be.revertedWith("New bid is not higher than the current highest bid.");
+        });
+        it("Should reject consecutive bids by the same user without an intervening higher bid", async function () {
+            const sellOfferId = await marketPlace.currentsellOfferId();            
+            const bidAmount = ethers.parseEther("10"); // Bid amount in ether
+
+            // Approve the sellOffer contract to spend the bidder's tokens
+            await dummyToken.connect(bidder).approve(auctionAddress, ethers.parseEther("100"));
+            await advanceTimeTo(startTime);
+            // Place a valid first bid
+            await marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, bidAmount, []);
+
+            // Attempt to place another bid by the same user without an intervening higher bid
+            const secondBidAmount = ethers.parseEther("15"); // Higher than the first bid but by the same user
+            await expect(marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, secondBidAmount, []))
+                .to.be.revertedWith("You already made a bid");
+        });
+        it("Should correctly transfer the bid amount from the bidder to the sellOffer contract", async function () {
+            const sellOfferId = await marketPlace.currentsellOfferId();            
+            const bidAmount = ethers.parseEther("10"); // Bid amount in ether
+
+            // Approve the sellOffer contract to spend the bid amount on behalf of the bidder
+            await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
+
+            // Record the initial balances of the bidder and the sellOffer contract
+            const initialBidderBalance = BigInt((await dummyToken.balanceOf(bidder.address)).toString());
+            const initialAuctionBalance = BigInt((await dummyToken.balanceOf(auctionAddress)).toString());
+            // Place a bid
+            await advanceTimeTo(startTime);
+            await marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, bidAmount, []);
+
+            // Record the final balances of the bidder and the sellOffer contract
+            const finalBidderBalance = BigInt(await dummyToken.balanceOf(bidder.address));
+            const finalAuctionBalance = BigInt(await dummyToken.balanceOf(auctionAddress));
+
+            // Calculate the expected balances after the bid
+            const expectedBidderBalance = initialBidderBalance - bidAmount;
+            const expectedAuctionBalance = initialAuctionBalance + bidAmount;
+
+            // Assert that the balances are as expected
+            expect(finalBidderBalance).to.equal(expectedBidderBalance);
+            expect(finalAuctionBalance).to.equal(expectedAuctionBalance);
+        });
+        it("Should lock the bid amount in a TimeLock contract for STAKE auctions after sellOffer ends and user claims ERC721 NFT", async function () {
+            await simpleERC721.mint(stakeAuctionCreator.address);
+            tokenId = await simpleERC721.tokenIds();
+            const stakeSellOfferParams = await generateSellOfferParams([tokenId], "STAKE", false, [1]); // Assuming ERC721
+            await marketPlace.connect(stakeAuctionCreator).createSellOffer(stakeSellOfferParams);
+
+            const sellOfferId = await marketPlace.currentsellOfferId();        
+            const bidAmount = ethers.parseEther("10"); // Bid amount in ether
+
+            // Approve the sellOffer contract to spend the bidder's tokens
+            await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
+
+            // Place a bid in a STAKE sellOffer
+            await advanceTimeTo(stakeSellOfferParams.startTime + 1);
+            await marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, bidAmount, []);
+
+            // End the sellOffer
+            await advanceTimeTo(stakeSellOfferParams.endTime + 10 * 60 + 1);
+            
+            // Claim the NFT
+            await marketPlace.connect(bidder).claimNFT(sellOfferId, tokenId);
+
+            // Check if the bid amount is locked in the TimeLock contract
+            const lockedTokens = await timeLock.getUserLocks(bidder.address);
+            const lockedAmount = lockedTokens[0].amount;
+            const expectedLockedAmount = BigInt(bidAmount);
+
+            // Assert that the locked amount in the TimeLock contract is equal to the bid amount
+            expect(lockedAmount).to.equal(expectedLockedAmount);
+        });
+        it("Should correctly handle custom stakeDuration for STAKE type sellOffers with ERC721", async function () {
+            const customStakeDuration = 120; // Custom stake duration in seconds
+            await simpleERC721.mint(stakeAuctionCreator.address);
+            tokenId = await simpleERC721.tokenIds();
+            const stakeSellOfferParams = await generateSellOfferParams([tokenId], "STAKE", false, [1]); // Assuming ERC721
+            stakeSellOfferParams.stakeDuration = customStakeDuration;
+            await marketPlace.connect(stakeAuctionCreator).createSellOffer(stakeSellOfferParams);
+
+            const sellOfferId = await marketPlace.currentsellOfferId();
+            const bidAmount = ethers.parseEther("15"); // Bid amount in ether
+
+            // Approve the sellOffer contract to spend the bidder's tokens
+            await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
+
+            // Place a bid in a STAKE sellOffer
+            await advanceTimeTo(stakeSellOfferParams.startTime + 1);
+            await marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, bidAmount, []);
+
+            // End the sellOffer
+            await advanceTimeTo(stakeSellOfferParams.endTime + 10 * 60 + 1);
+            const beforeBidderBalance = await simpleERC721.balanceOf(bidder.address);
+
+            // Claim the NFT
+            await marketPlace.connect(bidder).claimNFT(sellOfferId, tokenId);
+
+            // Check if the bid amount is locked in the TimeLock contract for the custom stake duration
+            const lockedTokens = await timeLock.getUserLocks(bidder.address);
+            const lockedAmount = lockedTokens[0].amount;
+            const lockEndTime = lockedTokens[0].unlockTime;
+            const expectedLockedAmount = BigInt(bidAmount);
+            const expectedLockEndTime = BigInt(stakeSellOfferParams.endTime + customStakeDuration);
+
+            // Assert that the locked amount and lock end time in the TimeLock contract are as expected
+            expect(lockedAmount).to.equal(expectedLockedAmount);
+            expect(lockEndTime).to.equal(expectedLockEndTime);
+
+            const bidderBalance = await simpleERC721.balanceOf(bidder.address);            
+            expect(bidderBalance.toString()).to.equal((BigInt(beforeBidderBalance) + BigInt(1)).toString(), "Bidder should have the NFT");
+        });
+    });
     describe("Bidding", function () {
         let startTime, endTime;
         beforeEach(async function () {
@@ -528,9 +804,8 @@ describe("SellOffer", function () {
             await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
 
             // Record the initial balances of the bidder and the sellOffer contract
-            const initialBidderBalance = BigInt(await dummyToken.balanceOf(bidder.address));
-            const initialAuctionBalance = BigInt(await dummyToken.balanceOf(auctionAddress));
-
+            const initialBidderBalance = BigInt((await dummyToken.balanceOf(bidder.address)).toString());
+            const initialAuctionBalance = BigInt((await dummyToken.balanceOf(auctionAddress)).toString());
             // Place a bid
             await advanceTimeTo(startTime);
             await marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, bidAmount, []);
@@ -577,7 +852,119 @@ describe("SellOffer", function () {
             // Assert that the locked amount in the TimeLock contract is equal to the bid amount
             expect(lockedAmount).to.equal(expectedLockedAmount);
         });
+        it("Should correctly handle custom stakeDuration for STAKE type sellOffers", async function () {
+            const customStakeDuration = 120; // Custom stake duration in seconds
+            const stakeSellOfferParams = await generateSellOfferParams([23], "STAKE");
+            stakeSellOfferParams.stakeDuration = customStakeDuration;
+            await simpleERC1155.mint(stakeAuctionCreator.address, 23, 1, ethers.toUtf8Bytes(""));
+            await marketPlace.connect(stakeAuctionCreator).createSellOffer(stakeSellOfferParams);
+
+            const sellOfferId = await marketPlace.currentsellOfferId();
+            const tokenId = 23; // Assuming a token with ID 23 is part of the sellOffer
+            const bidAmount = ethers.parseEther("15"); // Bid amount in ether
+
+            // Approve the sellOffer contract to spend the bidder's tokens
+            await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
+
+            // Place a bid in a STAKE sellOffer
+            await advanceTimeTo(stakeSellOfferParams.startTime + 1);
+            await marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, bidAmount, []);
+
+            // End the sellOffer
+            await advanceTimeTo(stakeSellOfferParams.endTime + 10 * 60 + 1);
+            
+
+            // Claim the NFT
+            await marketPlace.connect(bidder).claimNFT(sellOfferId, tokenId);
+
+            // Check if the bid amount is locked in the TimeLock contract for the custom stake duration
+            const lockedTokens = await timeLock.getUserLocks(bidder.address);
+            
+            const lockedAmount = lockedTokens[0].amount;
+            const lockEndTime = lockedTokens[0].unlockTime;
+            const expectedLockedAmount = BigInt(bidAmount);
+            const expectedLockEndTime = BigInt(stakeSellOfferParams.endTime + customStakeDuration);
+
+            // Assert that the locked amount and lock end time in the TimeLock contract are as expected
+            expect(lockedAmount).to.equal(expectedLockedAmount);
+            
+            expect(lockEndTime).to.equal(expectedLockEndTime);    
+        });
         // Add more bidding related tests here
+    });
+
+    describe("ERC721 NFT Bidding and Claiming Functionality", function () {
+        let sellOfferId, tokenId, bidAmount, startTime, endTime;
+
+        beforeEach(async function () {
+            // Setup sellOffer parameters for ERC721
+            await simpleERC721.mint(bidAuctionCreator.address);
+            tokenId = await simpleERC721.tokenIds();
+            const SellOfferParams = await generateSellOfferParams([tokenId], "BID", false); // true indicates ERC721
+            startTime = SellOfferParams.startTime;
+            endTime = SellOfferParams.endTime;
+            await marketPlace.connect(bidAuctionCreator).createSellOffer(SellOfferParams);
+            sellOfferId = await marketPlace.currentsellOfferId();
+            bidAmount = ethers.parseEther("5"); // Bid amount in ether
+
+            // Approve and place a bid
+            await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
+            await advanceTimeTo(startTime + 1);
+            await marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, bidAmount, []);
+        });
+
+        it("Should allow the highest bidder to claim the ERC721 NFT after the sellOffer ends", async function () {
+            // End the sellOffer
+            await advanceTimeTo(endTime + (10 * 60) + 1);
+
+            // Claim the NFT
+            await expect(marketPlace.connect(bidder).claimNFT(sellOfferId, tokenId))
+                .to.emit(marketPlace, 'NFTClaimed');
+
+            // Check ownership of the NFT
+            const ownerBalance = await simpleERC721.balanceOf(bidder.address);
+            expect(ownerBalance).to.equal(1);
+        });
+
+        it("Should fail to claim the ERC721 NFT if the sellOffer has not ended", async function () {
+            // Attempt to claim the NFT before the sellOffer ends
+            await expect(marketPlace.connect(bidder).claimNFT(sellOfferId, tokenId))
+                .to.be.revertedWith("SellOffer not yet ended");
+        });
+
+        it("Should fail to claim the ERC721 NFT if the caller is not the highest bidder", async function () {
+            // End the sellOffer
+            await advanceTimeTo(endTime + (10 * 60) + 1);
+
+            // Another user attempts to claim the NFT
+            await expect(marketPlace.connect(otherBidder).claimNFT(sellOfferId, tokenId))
+                .to.be.revertedWith("Caller is not the winner");
+        });
+
+        it("Should not allow claiming ERC721 NFTs for BUYNOW auctions", async function () {
+            await simpleERC721.mint(buyNowAuctionCreator.address);
+            tokenId = await simpleERC721.tokenIds();
+            const buynowSellOfferParams = await generateSellOfferParams([tokenId], "BUYNOW", false);
+            await marketPlace.connect(buyNowAuctionCreator).createSellOffer(buynowSellOfferParams);
+            const buynowsellOfferId = await marketPlace.currentsellOfferId();
+
+            // Attempt to claim the NFT for a BUYNOW sellOffer
+            await expect(marketPlace.connect(bidder).claimNFT(buynowsellOfferId, tokenId))
+                .to.be.revertedWith("Claiming not allowed for BUYNOW SellOffers");
+        });
+
+        it("Should fail to claim the ERC721 NFT if it has already been claimed", async function () {
+            // End the sellOffer
+            await advanceTimeTo(endTime + (10 * 60) + 1);
+
+            // First claim attempt
+            await expect(marketPlace.connect(bidder).claimNFT(sellOfferId, tokenId))
+                .to.emit(marketPlace, 'NFTClaimed');
+
+            // Second claim attempt
+            await expect(marketPlace.connect(bidder).claimNFT(sellOfferId, tokenId))
+                .to.be.revertedWith("NFT already claimed");
+        });
     });
 
     describe("Claim NFT Functionality", function () {
@@ -878,15 +1265,89 @@ describe("SellOffer", function () {
             await expect(marketPlace.connect(creator).cancel(sellOfferId))
                 .to.be.revertedWith("SellOffer is already canceled");
         });
+    });
 
-        // it("Should handle reentrancy attacks when canceling a sellOffer", async function () {
-        //     // This test would require a custom contract to attempt reentrancy, which is not shown here
-        //     // For demonstration, assume we have a ReentrancyAttackContract and we will use it to test
-        //     const ReentrancyAttack = await ethers.getContractFactory("ReentrancyAttack");
-        //     const reentrancyAttack = await ReentrancyAttack.deploy(marketPlace.address);
-        //     await expect(reentrancyAttack.attack(sellOfferId))
-        //         .to.be.revertedWith("Reentrant call detected");
-        // });
+    describe("ERC721 Payout Functionality", function () {
+        let sellOfferId, creator, bidder, sellOfferParams, bidAmount, tokenId;
+
+        beforeEach(async function () {
+            creator = bidAuctionCreator; // Assuming bidAuctionCreator is the creator of the sellOffer
+            bidder = otherBidder; // Assuming otherBidder is a bidder
+            bidAmount = ethers.parseEther("5");
+            await simpleERC721.mint(creator.address);
+            await dummyToken.connect(bidder).approve(auctionAddress, bidAmount);
+            tokenId = await simpleERC721.tokenIds();
+            await simpleERC721.mint(creator.address);
+            sellOfferParams = await generateSellOfferParams([tokenId], "BID", false); // true indicates ERC721
+            await marketPlace.connect(creator).createSellOffer(sellOfferParams);
+            sellOfferId = await marketPlace.currentsellOfferId();
+            await advanceTimeTo(sellOfferParams.startTime + 1);
+            await marketPlace.connect(bidder).placeBid(sellOfferId, tokenId, bidAmount, []);
+            await advanceTimeTo(sellOfferParams.endTime + 10*60 + 1);
+        });
+
+        it("Should successfully execute payout for ERC721 by the sell offer creator when conditions are met", async function () {
+            await expect(marketPlace.connect(creator).payout(sellOfferId))
+                .to.emit(marketPlace, 'SellOfferPayout');
+        });
+
+        it("Should only allow the sell offer creator to initiate the payout for ERC721", async function () {
+            await expect(marketPlace.connect(bidder).payout(sellOfferId))
+                .to.be.revertedWith("Only the creator can payout");
+        });
+
+        it("Should not allow payout for ERC721 if the sell offer is already marked as paid out", async function () {        
+            await marketPlace.connect(creator).payout(sellOfferId);
+            await expect(marketPlace.connect(creator).payout(sellOfferId))
+                .to.be.revertedWith("SellOffer is already payout");
+        });
+
+        it("Should not allow payout for ERC721 if the sell offer is canceled", async function () {
+            await simpleERC721.mint(creator.address);
+            tokenId = await simpleERC721.tokenIds();
+            sellOfferParams = await generateSellOfferParams([tokenId], "BID", false); // true indicates ERC721
+            await marketPlace.connect(creator).createSellOffer(sellOfferParams);
+            sellOfferId = await marketPlace.currentsellOfferId();
+            await marketPlace.connect(creator).cancel(sellOfferId);
+            await expect(marketPlace.connect(creator).payout(sellOfferId))
+                .to.be.revertedWith("SellOffer can't be payout");
+        });
+
+        it("Should ensure the correct amount of tokens is transferred to the payout address for ERC721", async function () {
+            const payoutAddressInitialBalance = await dummyToken.balanceOf(sellOfferParams.payoutAddress);
+                       
+            await marketPlace.connect(creator).payout(sellOfferId);
+
+            const payoutAddressFinalBalance = await dummyToken.balanceOf(sellOfferParams.payoutAddress);
+            const expectedPayoutAddressFinalBalance = BigInt(payoutAddressInitialBalance) + BigInt(bidAmount);
+
+            // Assert that the creator's balance has increased by the bidAmount
+            expect(payoutAddressFinalBalance.toString()).to.equal(expectedPayoutAddressFinalBalance.toString(), "Payout address's balance should increase by the bid amount");
+        });
+
+        it("Should return NFT to creator if no bids are made after payout", async function () {
+            // Mint an NFT to the creator
+            await simpleERC721.mint(creator.address);
+            tokenId = await simpleERC721.tokenIds();
+
+            // Approve the auction contract to spend NFT on behalf of the creator
+            await simpleERC721.connect(creator).setApprovalForAll(auctionAddress, true);
+
+            // Create a sell offer with the NFT
+            const sellOfferParams = await generateSellOfferParams([tokenId], "BID", false);
+            await marketPlace.connect(creator).createSellOffer(sellOfferParams);
+            const sellOfferId = await marketPlace.currentsellOfferId();
+
+            // Advance time to after the auction end time
+            await advanceTimeTo(sellOfferParams.endTime + 1);
+            const beforeCreatorBalance = await simpleERC721.balanceOf(creator.address);
+            // Execute payout
+            await marketPlace.connect(creator).payout(sellOfferId);
+
+            // Check that the NFT has been returned to the creator
+            const creatorBalance = await simpleERC721.balanceOf(creator.address);            
+            expect(creatorBalance.toString()).to.equal((BigInt(beforeCreatorBalance) + BigInt(1)).toString(), "Creator should have the NFT returned after payout with no bids");
+        });
     });
 
     describe("Payout Functionality", function () {
@@ -1028,8 +1489,7 @@ describe("SellOffer", function () {
             await simpleERC1155.connect(creator).setApprovalForAll(auctionAddress, true);
 
             const sellOfferParams1 = await generateSellOfferParams([25], "BID");
-            const sellOfferParams2 = await generateSellOfferParams([26], "BID");
-
+            const sellOfferParams2 = await generateSellOfferParams([26], "BID");                        
             await marketPlace.connect(creator).createSellOffer(sellOfferParams1);
             const sellOfferId1 = await marketPlace.currentsellOfferId();
 
@@ -1039,26 +1499,31 @@ describe("SellOffer", function () {
             // Advance time to after the auction end time for both sell offers
             await advanceTimeTo(sellOfferParams1.endTime + 1);
             await advanceTimeTo(sellOfferParams2.endTime + 1);
-
             // Retrieve sell offers needing payout
-            const sellOffersNeedingPayout = await marketPlace.getSellOffersNeedingPayoutForCreator(creator.address);
-
+            const sellOffersNeedingPayout = await marketPlace.getSellOffersNeedingPayoutForCreator(creator.address);            
             // Check if the retrieved sell offers are correct
             expect(sellOffersNeedingPayout).to.include.members([BigInt(sellOfferId1), BigInt(sellOfferId2)], "Should retrieve correct sell offers needing payout for the creator");
         });
 
         it("Should correctly payout the last ten sell offers for a creator", async function () {
             // Mint and create multiple sell offers
-            for (let i = 0; i < 15; i++) {
+            const first_id = await marketPlace.currentsellOfferId();
+            for (let i = 0; i < 14; i++) {
                 await simpleERC1155.mint(creator.address, 30 + i, 1, ethers.toUtf8Bytes(""));
                 await simpleERC1155.connect(creator).setApprovalForAll(auctionAddress, true);
                 const sellOfferParams = await generateSellOfferParams([30 + i], "BID");
-                await marketPlace.connect(creator).createSellOffer(sellOfferParams);
+                await marketPlace.connect(creator).createSellOffer(sellOfferParams);                
             }
 
             // Advance time to after the last auction end time
             const lastSellOfferParams = await generateSellOfferParams([44], "BID");
-            await advanceTimeTo(lastSellOfferParams.endTime + 1);
+            await advanceTimeTo(lastSellOfferParams.endTime + 86400);
+
+            const sellOfferId = await marketPlace.currentsellOfferId();
+
+            const sellOffersBeforePayout = await marketPlace.getSellOffersNeedingPayoutForCreator(creator.address);
+
+            expect(sellOffersBeforePayout.length).to.equal(15);
 
             // Call payoutLastTenSellOffersForCreator
             await marketPlace.connect(creator).payoutSellOffersForCreator(10);
@@ -1068,22 +1533,21 @@ describe("SellOffer", function () {
             expect(sellOffers.length).to.equal(5, "Only the first five sell offers should need payout");
 
             // Check that the last ten sell offers have been marked as payout
-            for (let i = 5; i < 15; i++) {
-                const currentSellOfferId = await marketPlace.currentsellOfferId();
-                const sellOfferId = BigInt(currentSellOfferId) - BigInt(15 - i);
+            let payoutTrueCount = 0;
+            let payoutFalseCount = 0;
+            for (let i = 0; i < 15; i++) {
+                const sellOfferId = BigInt(first_id) + BigInt(i);
                 const sellOfferDetails = await marketPlace.sellOfferDetails(Number(sellOfferId));
-                expect(sellOfferDetails.isPayout).to.be.true;
+                if (sellOfferDetails.isPayout) {
+                    payoutTrueCount++;
+                } else {
+                    payoutFalseCount++;
+                }
             }
+            expect(payoutTrueCount).to.equal(10, "Ten sell offers should have isPayout true");
+            expect(payoutFalseCount).to.equal(5, "Five sell offers should have isPayout false");            
         });
 
-        // it("Should handle multiple tokens correctly in the payout", async function () {
-        //     // Assuming multiple tokens are involved in the sell offer
-        //     await simpleERC1155.mint(creator.address, 21, 1, ethers.toUtf8Bytes(""));
-        //     await marketPlace.connect(bidder).placeBid(sellOfferId, 21, bidAmount, []);
-        //     await marketPlace.connect(creator).payout(sellOfferId);
-        //     const sellOfferDetails = await marketPlace.sellOfferDetails(sellOfferId);
-        //     expect(sellOfferDetails.tokenIds).to.include.members([20, 21]);
-        // });
     });
 
 

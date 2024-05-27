@@ -20,11 +20,10 @@ contract TimeLock is AccessControl, ReentrancyGuard {
 
     mapping(address => LockedToken[]) public lockedTokens;
 
-    event TokenDeposited(address indexed user, IERC20 indexed token, uint256 amount, uint256 unlockTime);
-    event TokenWithdrawn(address indexed user, IERC20 indexed token, uint256 amount);
+    event TokenLocked(address indexed user, IERC20 indexed token, uint256 amount, uint256 unlockTime, uint256 index);
+    event TokenReleased(address indexed user, IERC20 indexed token, uint256 amount, uint256 index);
 
-    constructor(address _admin, uint256 _lockPeriod, address _marketplaceContract) {
-        lockPeriod = _lockPeriod == 0 ? SECONDS_IN_A_YEAR : _lockPeriod;
+    constructor(address _admin, address _marketplaceContract) {
         marketplaceContract = _marketplaceContract;
 
         _grantRole(DEFAULT_ADMIN_ROLE, _admin); // Grant the deployer the default admin role
@@ -44,17 +43,18 @@ contract TimeLock is AccessControl, ReentrancyGuard {
         _grantRole(MARKETPLACE_ROLE, _marketplaceContract); // Assign the role to the new marketplace contract
     }
 
-    function deposit(address _token, uint256 _amount, address _user) external onlyMarketplaceContract { 
+    function deposit(address _token, uint256 _amount, address _user, uint256 _unlockTime) external onlyMarketplaceContract { 
         require(_amount > 0, "Amount must be greater than 0.");
         require(IERC20(_token).transferFrom(msg.sender, address(this), _amount), "Token transfer failed.");
 
+        uint256 index = lockedTokens[_user].length;
         lockedTokens[_user].push(LockedToken({
             token: IERC20(_token),
             amount: _amount,
-            unlockTime: block.timestamp + lockPeriod
+            unlockTime: _unlockTime
         }));
 
-        emit TokenDeposited(_user, IERC20(_token), _amount, block.timestamp + lockPeriod);
+        emit TokenLocked(_user, IERC20(_token), _amount, _unlockTime, index);
     }
 
     function withdraw(uint256 _index) external nonReentrant {
@@ -66,7 +66,7 @@ contract TimeLock is AccessControl, ReentrancyGuard {
         lockedToken.amount = 0;
         require(lockedToken.token.transfer(msg.sender, amount), "Token withdrawal failed.");
 
-        emit TokenWithdrawn(msg.sender, lockedToken.token, amount);
+        emit TokenReleased(msg.sender, lockedToken.token, amount, _index);
     }
 
     function getUserLocks(address _user) external view returns (LockedToken[] memory) {
